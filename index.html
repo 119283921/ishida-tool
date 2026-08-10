@@ -517,16 +517,168 @@ function setMode(m){
 
 /* ============================================================
    エリア判定（住所→市区町村→ゾーン）
+   ============================================================
+   考慮している表記ゆれ・曖昧パターン：
+   1. 「ヶ／ケ／ヵ／カ」の表記ゆれ（鎌ヶ谷市⇔鎌ケ谷市 等）
+   2. 政令市の区制以前の旧市町名で、区が1つに確定するもの（大宮・岩槻・与野・城山 等）→ 自動解決
+   3. 旧市町名でも複数区にまたがり1つに確定できないもの（浦和 等）→ 自動確定せず警告
+   4. 政令市名（さいたま市・横浜市 等）だけが書かれていて区が書かれていないもの→ 警告
+   5. 政令市名を省いて区名だけ言われた場合でも、その区名が他都市と衝突しない一意なもの
+      （例：港北区・大宮区・浦和区）は自動解決する
+   6. 「中央区」「北区」「南区」「西区」「緑区」のように、区名だけだと複数の都市・東京都の
+      特別区と衝突しうるもの→都道府県名・市名（例:千葉・さいたま・相模原）のヒントがあれば
+      自動解決、なければ候補を提示して警告（例5の「港北区」等は北区の部分文字列を含むが、
+      区名として一意に確定するため誤って北区の衝突扱いにはしない）
+   のいずれも、誤ったゾーンを黙って確定させないことを最優先にしている。
    ============================================================ */
-function matchZoneByAddress(addr){
-  if(!addr) return null;
-  let best = null;
+// 「ヶ／ケ／ヵ／カ」の表記ゆれを吸収するための正規化（鎌ヶ谷市⇔鎌ケ谷市、茅ケ崎市⇔茅ヶ崎市 等）
+function normalizeKana(s){
+  if(!s) return s;
+  return s.replace(/ヶ|ヵ/g, m => m === "ヶ" ? "ケ" : "カ");
+}
+const WARD_SPLIT_CITIES = ["横浜市","川崎市","相模原市","さいたま市","千葉市"];
+// 政令指定都市の区制以前に使われていた旧市町名で、区が1つに確定するもの（分割されない）のみ登録。
+// 旧浦和市のように現在複数の区にまたがるものは含めない（誤判定防止のため下のAMBIGUOUS_HISTORICAL_NAMESで警告表示）。
+const CITY_NAME_ALIASES = {
+  "大宮": "さいたま市大宮区",   // 旧大宮市 → そのまま大宮区
+  "与野": "さいたま市中央区",   // 旧与野市 → そのまま中央区
+  "岩槻": "さいたま市岩槻区",   // 旧岩槻市 → そのまま岩槻区
+  "城山": "相模原市緑区",       // 旧津久井郡城山町
+  "津久井": "相模原市緑区",     // 旧津久井郡津久井町
+  "相模湖": "相模原市緑区",     // 旧津久井郡相模湖町
+  "藤野": "相模原市緑区",       // 旧津久井郡藤野町
+};
+// 政令市の旧市町名のうち、現在複数の区にまたがっていて区を1つに確定できないもの。
+// 例：旧浦和市はさいたま市の浦和区・南区・桜区・緑区・中央区の一部にまたがる。
+const AMBIGUOUS_HISTORICAL_NAMES = {
+  "浦和": "さいたま市",
+};
+// 「区名部分」（政令市プレフィックスを除いた区名、および東京都特別区の正式名そのもの）を
+// キーに、それを名乗るcityZonesエントリを集めたインデックスを毎回動的に構築する。
+// state.cityZonesは設定タブから編集され得るため、キャッシュせず呼び出し都度組み立てる。
+// 例： "港北区" -> [横浜市港北区]（1件＝一意）　"北区" -> [東京都北区, さいたま市北区]（2件＝衝突）
+function buildWardPartOwners(){
+  const map = {};
+  const add = (part, cz) => { if(!part) return; (map[part] = map[part] || []).push(cz); };
   state.cityZones.forEach(cz=>{
-    if(cz.city && addr.includes(cz.city)){
-      if(!best || cz.city.length > best.city.length) best = cz;
+    if(!cz.city) return;
+    if(cz.city.endsWith("区") && !WARD_SPLIT_CITIES.some(p => cz.city.startsWith(p))){
+      add(cz.city, cz); // 東京都特別区など、政令市名を持たない「区」単体
     }
+    WARD_SPLIT_CITIES.forEach(parent=>{
+      if(cz.city.startsWith(parent) && cz.city.length > parent.length){
+        add(cz.city.slice(parent.length), cz); // 政令市プレフィックスを除いた区名部分
+      }
+    });
   });
-  return best;
+  return map;
+}
+// 都道府県名・政令市名（「市」を除いた形も含む）が住所文中に含まれていれば、候補群から一意に絞り込む。
+function resolveByLocationHint(owners, normAddr){
+  const matched = owners.filter(cz=>{
+    const hints = [cz.pref];
+    WARD_SPLIT_CITIES.forEach(parent=>{
+      if(cz.city.startsWith(parent)){
+        hints.push(parent, parent.replace(/市$/,""));
+      }
+    });
+    return hints.some(h => h && normAddr.includes(normalizeKana(h)));
+  });
+  return matched.length === 1 ? matched[0] : null;
+}
+// 住所文字列からゾーンを判定する統合関数。
+// 戻り値: { zone: マッチしたcityZonesの要素 or null, ambiguity: {label, candidates} or null }
+// zoneとambiguityが両方nullの場合は「該当なし」（市区町村名を含めて入力してください、の表示になる）。
+function resolveAddress(addr){
+  if(!addr) return {zone:null, ambiguity:null};
+  const normAddr = normalizeKana(addr);
+  const wardPartOwners = buildWardPartOwners();
+
+  // 1) 政令市名だけが書かれていて、区がフルで一致していないケース（例：「さいたま市」だけ）
+  for(const parent of WARD_SPLIT_CITIES){
+    if(normAddr.includes(normalizeKana(parent))){
+      const hasFullWardMatch = state.cityZones.some(cz=>
+        cz.city.startsWith(parent) && cz.city.length > parent.length && normAddr.includes(normalizeKana(cz.city))
+      );
+      if(!hasFullWardMatch){
+        const candidates = state.cityZones.filter(cz=>cz.city.startsWith(parent));
+        return {zone:null, ambiguity:{
+          label:`${parent}は区によって運搬費エリアが異なります。区名も入力するか（例：${parent}中区）、下記から区を選んでください。`,
+          candidates
+        }};
+      }
+    }
+  }
+
+  // 2) 候補収集：(a)登録名がそのまま含まれるもの ＋ (b)政令市名を省略しても区名部分が
+  //    一意（他都市と衝突しない）なら、市名なしでも候補に加える（例：「港北区」→横浜市港北区）
+  let candidates = [];
+  state.cityZones.forEach(cz=>{
+    if(cz.city && normAddr.includes(normalizeKana(cz.city))) candidates.push(cz);
+  });
+  for(const part in wardPartOwners){
+    const owners = wardPartOwners[part];
+    if(owners.length !== 1) continue; // 他都市と衝突する区名部分は自動追加しない（3.でまとめて警告）
+    const owner = owners[0];
+    if(candidates.includes(owner)) continue;
+    if(normAddr.includes(normalizeKana(part))) candidates.push(owner);
+  }
+
+  if(candidates.length){
+    candidates.sort((a,b)=> b.city.length - a.city.length);
+    const best = candidates[0];
+    // best が「政令市プレフィックスの付かない区名単独」（例：東京都の「中央区」「北区」）で、
+    // 同じ区名が他都市にも存在する場合のみ、衝突として扱う（一意な区名は上のb.で既に安全に解決済み）
+    const hasPrefix = WARD_SPLIT_CITIES.some(p => best.city.startsWith(p));
+    const owners = !hasPrefix ? wardPartOwners[best.city] : null;
+    if(owners && owners.length > 1){
+      const resolved = resolveByLocationHint(owners, normAddr);
+      if(resolved) return {zone:resolved, ambiguity:null};
+      return {zone:null, ambiguity:{
+        label:`「${best.city}」は複数のエリアに同名の区があります（${owners.map(o=>o.pref+o.city).join("・")}）。都道府県名・市名も入力するか、下記から選んでください。`,
+        candidates: owners
+      }};
+    }
+    return {zone:best, ambiguity:null};
+  }
+
+  // 3) 政令市の旧市町名エイリアス（区が1つに確定するもののみ、自動解決）
+  for(const key in CITY_NAME_ALIASES){
+    if(normAddr.includes(normalizeKana(key))){
+      const target = CITY_NAME_ALIASES[key];
+      const cz = state.cityZones.find(c => c.city === target);
+      if(cz) return {zone:cz, ambiguity:null};
+    }
+  }
+
+  // 4) 区が複数にまたがる曖昧な旧市町名（例：旧浦和市）→ 自動確定せず警告
+  for(const key in AMBIGUOUS_HISTORICAL_NAMES){
+    if(normAddr.includes(normalizeKana(key))){
+      const parent = AMBIGUOUS_HISTORICAL_NAMES[key];
+      const candidates = state.cityZones.filter(cz=>cz.city.startsWith(parent));
+      return {zone:null, ambiguity:{
+        label:`「${key}」は${parent}の複数の区にまたがるため自動判定できません。区名も入力するか、下記から選んでください。`,
+        candidates
+      }};
+    }
+  }
+
+  // 5) 上記のどれにも一致しないが、「南区」「西区」「緑区」など複数都市にまたがる区名部分が
+  //    文中に含まれている場合は、汎用の「判定できません」より具体的な警告を出す
+  for(const part in wardPartOwners){
+    const owners = wardPartOwners[part];
+    if(owners.length > 1 && normAddr.includes(normalizeKana(part))){
+      return {zone:null, ambiguity:{
+        label:`「${part}」は複数のエリアに同名の区があります（${owners.map(o=>o.pref+o.city).join("・")}）。都道府県名・市名も入力するか、下記から選んでください。`,
+        candidates: owners
+      }};
+    }
+  }
+
+  return {zone:null, ambiguity:null};
+}
+function matchZoneByAddress(addr){
+  return resolveAddress(addr).zone;
 }
 function prefAreaFor(cz){
   if(!cz) return null;
@@ -560,7 +712,7 @@ function backToAutoDetect(){
 function currentZone(){
   if(mode !== "collect") return null;
   if(manualAreaOverride) return manualZone;
-  return matchZoneByAddress(lastAddress);
+  return resolveAddress(lastAddress).zone;
 }
 
 function renderAreaCard(){
@@ -591,7 +743,9 @@ function renderAddressStatus(){
   if(!area) return;
   let html = "";
 
-  const cz = currentZone();
+  const cz = manualAreaOverride ? manualZone : (mode==="collect" ? resolveAddress(lastAddress).zone : null);
+  const ambiguity = (!manualAreaOverride && mode==="collect" && !cz && lastAddress) ? resolveAddress(lastAddress).ambiguity : null;
+
   if(manualAreaOverride && cz){
     html += `<div class="chip">✋ 手動選択中：${cz.pref}${cz.city}（${ZONE_LABELS[cz.zone]||cz.zone}）
       <button type="button" class="link-btn" onclick="backToAutoDetect()">住所からの自動判定に戻す</button>
@@ -601,19 +755,29 @@ function renderAddressStatus(){
       <button type="button" class="link-btn" onclick="toggleManualAreaGrid()">${showManualAreaGrid?'閉じる':'他のエリアを選ぶ'}</button>
     </div>`;
   } else if(lastAddress){
-    html += `<div class="chip warn-chip">⚠ 対応エリアが判定できません（市区町村名を含めて入力してみてください）
-      <button type="button" class="link-btn" onclick="toggleManualAreaGrid()">${showManualAreaGrid?'閉じる':'手動でエリアを選ぶ'}</button>
-    </div>`;
+    if(ambiguity){
+      html += `<div class="chip warn-chip">⚠ ${escapeAttr(ambiguity.label)}
+        <button type="button" class="link-btn" onclick="toggleManualAreaGrid()">${showManualAreaGrid?'閉じる':'区を選ぶ'}</button>
+      </div>`;
+    } else {
+      html += `<div class="chip warn-chip">⚠ 対応エリアが判定できません（市区町村名を含めて入力してみてください）
+        <button type="button" class="link-btn" onclick="toggleManualAreaGrid()">${showManualAreaGrid?'閉じる':'手動でエリアを選ぶ'}</button>
+      </div>`;
+    }
   } else {
     html += `<p class="section-hint">住所を入力すると、登録済みの市区町村表から自動でゾーンを判定します。</p>
     <button type="button" class="link-btn" onclick="toggleManualAreaGrid()">${showManualAreaGrid?'閉じる':'住所が分からない場合は手動でエリアを選ぶ'}</button>`;
   }
 
   if(showManualAreaGrid){
+    const candList = ambiguity ? ambiguity.candidates : null;
+    const options = state.cityZones
+      .map((c,i)=>({c,i}))
+      .filter(({c})=> !candList || candList.includes(c));
     html += `<div class="search-row" style="margin-top:10px;">
       <select id="manualZoneSelect" onchange="onManualZoneSelectChange(this)">
         <option value="">-- 市区町村を選択 --</option>
-        ${state.cityZones.map((c,i)=>`<option value="${i}">${c.pref}${c.city}（${ZONE_LABELS[c.zone]||c.zone}）</option>`).join("")}
+        ${options.map(({c,i})=>`<option value="${i}">${c.pref}${c.city}（${ZONE_LABELS[c.zone]||c.zone}）</option>`).join("")}
       </select>
     </div>`;
   }
