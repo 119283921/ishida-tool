@@ -528,39 +528,27 @@ function prefAreaFor(cz){
   return state.areas.find(a=>a.pref === cz.pref && a.id !== "kawaguchi");
 }
 function onAddressInput(el){
+  // 住所入力欄はDOMノードを再生成しない（IME変換中の文字化け防止）。
+  // 入力欄そのものは触らず、下の判定結果エリアだけを更新する。
   lastAddress = el.value;
-  if(el.dataset && el.dataset.composing === "1"){
-    // 日本語入力（IME）変換中は再描画しない（変換途中の文字が壊れるのを防ぐ）
-    return;
-  }
-  const pos = el.selectionStart;
-  renderAreaCard();
+  renderAddressStatus();
   renderResult();
-  const ne = document.getElementById("addressInput");
-  if(ne){ ne.focus(); try{ ne.setSelectionRange(pos, pos); }catch(e){} }
-}
-function onAddressCompositionStart(el){
-  if(el.dataset) el.dataset.composing = "1";
-}
-function onAddressCompositionEnd(el){
-  if(el.dataset) el.dataset.composing = "";
-  onAddressInput(el);
 }
 function toggleManualAreaGrid(){
   showManualAreaGrid = !showManualAreaGrid;
-  renderAreaCard();
+  renderAddressStatus();
 }
 function pickManualZone(pref, city, zone){
   manualZone = {pref, city, zone};
   manualAreaOverride = true;
   showManualAreaGrid = false;
-  renderAreaCard();
+  renderAddressStatus();
   renderResult();
 }
 function backToAutoDetect(){
   manualAreaOverride = false;
   manualZone = null;
-  renderAreaCard();
+  renderAddressStatus();
   renderResult();
 }
 function currentZone(){
@@ -586,9 +574,16 @@ function renderAreaCard(){
   }
 
   title.textContent = "現場住所からエリアを判定";
-  let html = `<div class="search-row">
-    <input type="text" id="addressInput" placeholder="現場住所を入力（例：埼玉県川口市〇〇）" value="${escapeAttr(lastAddress)}" oninput="onAddressInput(this)" oncompositionstart="onAddressCompositionStart(this)" oncompositionend="onAddressCompositionEnd(this)">
-  </div>`;
+  body.innerHTML = `<div class="search-row">
+    <input type="text" id="addressInput" placeholder="現場住所を入力（例：埼玉県川口市〇〇）" value="${escapeAttr(lastAddress)}" oninput="onAddressInput(this)">
+  </div>
+  <div id="addressStatusArea"></div>`;
+  renderAddressStatus();
+}
+function renderAddressStatus(){
+  const area = document.getElementById("addressStatusArea");
+  if(!area) return;
+  let html = "";
 
   const cz = currentZone();
   if(manualAreaOverride && cz){
@@ -617,7 +612,7 @@ function renderAreaCard(){
     </div>`;
   }
 
-  body.innerHTML = html;
+  area.innerHTML = html;
 }
 function onManualZoneSelectChange(sel){
   const idx = parseInt(sel.value);
