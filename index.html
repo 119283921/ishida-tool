@@ -200,6 +200,8 @@
       <div class="card">
         <h2><span class="num">1</span>受付方法を選ぶ</h2>
         <div class="mode-grid" id="modeGrid"></div>
+        <div id="stdCalcWrap" style="margin-top:10px;"></div>
+        <div id="bagCalcWrap" style="margin-top:10px;"></div>
       </div>
 
       <div class="card">
@@ -381,7 +383,9 @@ let manualZone = null;         // {pref,city,zone} when manually overridden
 let manualAreaOverride = false;
 let showManualAreaGrid = false;
 let calcOpen = false;
-let calcVals = {l:"", w:"", h:"", count:"1"};
+let calcVals = {l:"", w:"", h:"", count:"1", unit:"cm"};
+let stdCalcOpen = false;
+let stdCalcVals = {l:"", w:"", h:"", count:"1", unit:"cm"};
 let lastQty = "";
 let selectedVariant = "normal"; // normal/loading/unic/asbestos
 let surchargeState = {};        // id -> {checked, qty}
@@ -442,6 +446,8 @@ function switchTab(name){
     }
   } else {
     renderModeGrid();
+    renderStdCalcWrap();
+    renderBagCalcWrap();
     renderAreaCard();
     renderItemList();
     renderResult();
@@ -713,7 +719,7 @@ function updateCartQty(cartId, val){
 function clearSelection(){
   selectedItemId = null;
   lastQty = "";
-  calcOpen = false; calcVals = {l:"", w:"", h:"", count:"1"};
+  calcOpen = false; calcVals = {l:"", w:"", h:"", count:"1", unit:"cm"};
   surchargeState = {};
   surchargeExpanded = false;
   truckCount = "1";
@@ -758,7 +764,7 @@ function renderResult(){
     }
 
     html += `<div class="qty-row">
-      <input type="number" id="qtyInput" min="0" step="any" placeholder="数量を入力" value="${lastQty||''}" oninput="onQtyInput(this)">
+      <input type="text" inputmode="decimal" id="qtyInput" placeholder="数量を入力" value="${lastQty||''}" oninput="onQtyInput(this)">
       <div class="unit-toggle"><button type="button" class="active" disabled>${escapeAttr(item.unit)}</button></div>
     </div>`;
     if(item.unit === "㎥"){
@@ -822,7 +828,7 @@ function renderResult(){
       transportLabel = chosen.label;
       html += `<div class="truck-count-row" style="display:flex; align-items:center; gap:10px; margin:10px 0;">
         <span style="font-size:.9rem; color:var(--sub);">台数</span>
-        <input type="number" id="truckCountInput" min="1" step="1" value="${escapeAttr(truckCount)}" style="width:70px; min-height:44px; padding:6px 8px; border:2px solid var(--line); border-radius:8px; font-size:1rem; text-align:center;" oninput="onTruckCountInput(this)">
+        <input type="text" inputmode="numeric" id="truckCountInput" value="${escapeAttr(truckCount)}" style="width:70px; min-height:44px; padding:6px 8px; border:2px solid var(--line); border-radius:8px; font-size:1rem; text-align:center;" oninput="onTruckCountInput(this)">
         <span style="font-size:.8rem; color:var(--sub);">台（通常1台。複数台の指示があった場合のみ変更）</span>
       </div>`;
       html += `<div class="fee-line"><span class="label">運搬費概算（${escapeAttr(transportLabel)}・${ZONE_LABELS[cz.zone]||cz.zone}${tCount>1?`・${tCount}台`:''}）</span><span class="amount">${yen(transportFee)}</span></div>`;
@@ -890,24 +896,42 @@ function onSurchargeQty(id, val){
   renderResult();
 }
 
-function renderCalcPanel(){
-  const l = parseFloat(calcVals.l), w = parseFloat(calcVals.w), h = parseFloat(calcVals.h);
-  const count = parseFloat(calcVals.count);
+const CALC_UNIT_FACTORS = {mm: 1000000000, cm: 1000000, m: 1}; // l*w*h をこの値で割るとm³になる
+function calcVolume(vals){
+  const l = parseFloat(vals.l), w = parseFloat(vals.w), h = parseFloat(vals.h);
+  const count = parseFloat(vals.count);
+  const factor = CALC_UNIT_FACTORS[vals.unit] || CALC_UNIT_FACTORS.cm;
   let vol = 0;
   if(!isNaN(l) && !isNaN(w) && !isNaN(h) && l>=0 && w>=0 && h>=0){
-    vol = (l*w*h) / 1000000;
+    vol = (l*w*h) / factor;
     if(!isNaN(count) && count>0) vol *= count;
   }
+  return vol;
+}
+function calcUnitSelectHtml(id, vals, onchangeFn){
+  return `<select id="${id}" onchange="${onchangeFn}(this)">
+    <option value="mm" ${vals.unit==='mm'?'selected':''}>mm</option>
+    <option value="cm" ${vals.unit==='cm'?'selected':''}>cm</option>
+    <option value="m" ${vals.unit==='m'?'selected':''}>m</option>
+  </select>`;
+}
+function renderCalcPanel(){
+  const vol = calcVolume(calcVals);
   return `<div class="calc-panel">
     <div class="calc-row">
-      <input type="number" id="calcL" min="0" step="any" placeholder="縦(cm)" value="${calcVals.l}" oninput="onCalcInput(this,'l')">
-      <input type="number" id="calcW" min="0" step="any" placeholder="横(cm)" value="${calcVals.w}" oninput="onCalcInput(this,'w')">
-      <input type="number" id="calcH" min="0" step="any" placeholder="高さ(cm)" value="${calcVals.h}" oninput="onCalcInput(this,'h')">
-      <input type="number" id="calcCount" min="0" step="any" placeholder="個数" value="${calcVals.count}" oninput="onCalcInput(this,'count')">
+      ${calcUnitSelectHtml("calcUnit", calcVals, "onCalcUnitChange")}
+      <input type="text" inputmode="decimal" id="calcL" placeholder="縦(${calcVals.unit})" value="${calcVals.l}" oninput="onCalcInput(this,'l')">
+      <input type="text" inputmode="decimal" id="calcW" placeholder="横(${calcVals.unit})" value="${calcVals.w}" oninput="onCalcInput(this,'w')">
+      <input type="text" inputmode="decimal" id="calcH" placeholder="高さ(${calcVals.unit})" value="${calcVals.h}" oninput="onCalcInput(this,'h')">
+      <input type="text" inputmode="decimal" id="calcCount" placeholder="個数" value="${calcVals.count}" oninput="onCalcInput(this,'count')">
     </div>
     <div class="calc-result">計算結果：${vol.toLocaleString(undefined,{maximumFractionDigits:3})} m³</div>
     <button type="button" class="btn secondary" onclick="applyCalcVolume()">この数量欄に反映</button>
   </div>`;
+}
+function onCalcUnitChange(el){
+  calcVals.unit = el.value;
+  renderResult();
 }
 function onCalcInput(el, field){
   calcVals[field] = el.value;
@@ -919,14 +943,102 @@ function onCalcInput(el, field){
 }
 function toggleCalc(){ calcOpen = !calcOpen; renderResult(); }
 function applyCalcVolume(){
-  const l = parseFloat(calcVals.l), w = parseFloat(calcVals.w), h = parseFloat(calcVals.h);
-  const count = parseFloat(calcVals.count) || 1;
-  if(isNaN(l) || isNaN(w) || isNaN(h)) return;
-  const vol = (l*w*h)/1000000*count;
+  const vol = calcVolume(calcVals);
+  if(vol <= 0) return;
   lastQty = vol.toFixed(3);
   calcOpen = false;
   renderResult();
 }
+
+/* ============================================================
+   ㎥計算機（単体・受付方法の下に常設。品目未選択でも使える）
+   ============================================================ */
+function renderStdCalcWrap(){
+  const wrap = document.getElementById("stdCalcWrap");
+  if(!wrap) return;
+  let html = `<button type="button" class="link-btn" onclick="toggleStdCalc()">${stdCalcOpen?'▲ ㎥計算機を閉じる':'📐 ㎥計算機（寸法から体積を計算）'}</button>`;
+  if(stdCalcOpen){
+    const vol = calcVolume(stdCalcVals);
+    html += `<div class="calc-panel">
+      <div class="calc-row">
+        ${calcUnitSelectHtml("stdCalcUnit", stdCalcVals, "onStdCalcUnitChange")}
+        <input type="text" inputmode="decimal" id="stdCalcL" placeholder="縦(${stdCalcVals.unit})" value="${stdCalcVals.l}" oninput="onStdCalcInput(this,'l')">
+        <input type="text" inputmode="decimal" id="stdCalcW" placeholder="横(${stdCalcVals.unit})" value="${stdCalcVals.w}" oninput="onStdCalcInput(this,'w')">
+        <input type="text" inputmode="decimal" id="stdCalcH" placeholder="高さ(${stdCalcVals.unit})" value="${stdCalcVals.h}" oninput="onStdCalcInput(this,'h')">
+        <input type="text" inputmode="decimal" id="stdCalcCount" placeholder="個数" value="${stdCalcVals.count}" oninput="onStdCalcInput(this,'count')">
+      </div>
+      <div class="calc-result">計算結果：${vol.toLocaleString(undefined,{maximumFractionDigits:3})} m³</div>
+    </div>`;
+  }
+  wrap.innerHTML = html;
+}
+function toggleStdCalc(){ stdCalcOpen = !stdCalcOpen; renderStdCalcWrap(); }
+function onStdCalcUnitChange(el){ stdCalcVals.unit = el.value; renderStdCalcWrap(); }
+function onStdCalcInput(el, field){
+  stdCalcVals[field] = el.value;
+  const pos = el.selectionStart;
+  const id = "stdCalc" + field.charAt(0).toUpperCase() + field.slice(1);
+  renderStdCalcWrap();
+  const ne = document.getElementById(id);
+  if(ne){ ne.focus(); try{ ne.setSelectionRange(pos, pos); }catch(e){} }
+}
+
+/* ============================================================
+   袋数から㎥・料金を計算（ガラ袋・土嚢ぶくろ・ゴミ袋各サイズ）
+   ============================================================ */
+const BAG_TYPES_DATA = [
+  {name:"ガラ袋", label:"1枚あたり", m3PerBag:0.05, defaultPrice:28000},
+  {name:"土嚢ぶくろ", label:"1枚あたり", m3PerBag:0.02, defaultPrice:28000, minM3:0.1},
+  {name:"ゴミ袋", label:"45L", m3PerBag:0.05, defaultPrice:20000},
+  {name:"ゴミ袋", label:"70L", m3PerBag:0.1, defaultPrice:20000},
+  {name:"ゴミ袋", label:"90L", m3PerBag:0.15, defaultPrice:20000},
+  {name:"ゴミ袋", label:"110L", m3PerBag:0.3, defaultPrice:20000},
+  {name:"ゴミ袋", label:"130L", m3PerBag:0.5, defaultPrice:20000},
+];
+let bagCalcOpen = false;
+let bagCalcVals = BAG_TYPES_DATA.map(b=>({count:"", price:String(b.defaultPrice)}));
+
+function renderBagCalcWrap(){
+  const wrap = document.getElementById("bagCalcWrap");
+  if(!wrap) return;
+  let html = `<button type="button" class="link-btn" onclick="toggleBagCalc()">${bagCalcOpen?'▲ 袋数から計算を閉じる':'🛍 袋数から㎥・料金を計算'}</button>`;
+  if(bagCalcOpen){
+    let totalVol = 0, totalFee = 0;
+    const rows = BAG_TYPES_DATA.map((b,i)=>{
+      const v = bagCalcVals[i];
+      const count = parseFloat(v.count) || 0;
+      const price = parseFloat(v.price);
+      let vol = count * b.m3PerBag;
+      if(count > 0 && b.minM3 && vol < b.minM3) vol = b.minM3;
+      const fee = (!isNaN(price)) ? vol * price : 0;
+      totalVol += vol;
+      totalFee += fee;
+      return `<div class="surcharge-row">
+        <span class="sname">${escapeAttr(b.name)}<br><span class="cat">${escapeAttr(b.label)}／約${b.m3PerBag}㎥${b.minM3?`（最低${b.minM3}㎥）`:''}</span></span>
+        <input type="text" inputmode="numeric" class="sqty" id="bagCount${i}" placeholder="袋数" value="${v.count}" oninput="onBagCalcInput(this,${i},'count')">
+        <span class="sprice">袋</span>
+        <input type="text" inputmode="decimal" class="sqty" id="bagPrice${i}" placeholder="単価" value="${v.price}" oninput="onBagCalcInput(this,${i},'price')">
+        <span class="sprice">円/㎥</span>
+        <span class="snote">${vol.toLocaleString(undefined,{maximumFractionDigits:3})}㎥ ＝ ${yen(fee)}</span>
+      </div>`;
+    }).join("");
+    html += `<div class="calc-panel" style="padding:0;">
+      <div class="surcharge-list">${rows}</div>
+      <div class="fee-line" style="padding:10px 12px;"><span class="label">袋の合計</span><span class="amount">${totalVol.toLocaleString(undefined,{maximumFractionDigits:3})}㎥／${yen(totalFee)}</span></div>
+    </div>`;
+  }
+  wrap.innerHTML = html;
+}
+function toggleBagCalc(){ bagCalcOpen = !bagCalcOpen; renderBagCalcWrap(); }
+function onBagCalcInput(el, idx, field){
+  bagCalcVals[idx][field] = el.value;
+  const pos = el.selectionStart;
+  const id = (field==="count"?"bagCount":"bagPrice") + idx;
+  renderBagCalcWrap();
+  const ne = document.getElementById(id);
+  if(ne){ ne.focus(); try{ ne.setSelectionRange(pos, pos); }catch(e){} }
+}
+
 function onQtyInput(el){
   lastQty = el.value;
   const pos = el.selectionStart;
@@ -1165,6 +1277,8 @@ function resetDefaults(){
    ============================================================ */
 function renderAll(){
   renderModeGrid();
+  renderStdCalcWrap();
+  renderBagCalcWrap();
   renderAreaCard();
   renderItemList();
   renderResult();
