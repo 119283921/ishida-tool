@@ -232,7 +232,6 @@
 <main id="tab-settings" class="tab">
   <div class="card" id="settingsLock" style="display:none;">
     <h2>🔒 設定にはPINが必要です</h2>
-    <p class="section-hint">電話対応スタッフが誤って価格などの設定を変更しないための簡易ロックです（本格的な認証ではありません）。</p>
     <div class="qty-row">
       <input type="password" id="settingsPinInput" placeholder="PINを入力" style="min-height:52px; font-size:1.1rem;" onkeydown="if(event.key==='Enter') trySettingsUnlock();">
     </div>
@@ -530,14 +529,22 @@ function prefAreaFor(cz){
 }
 function onAddressInput(el){
   lastAddress = el.value;
-  const pos = el.selectionStart;
-  if(!manualAreaOverride){
-    // auto mode: nothing extra to store, matchZoneByAddress runs on render
+  if(el.dataset && el.dataset.composing === "1"){
+    // 日本語入力（IME）変換中は再描画しない（変換途中の文字が壊れるのを防ぐ）
+    return;
   }
+  const pos = el.selectionStart;
   renderAreaCard();
   renderResult();
   const ne = document.getElementById("addressInput");
   if(ne){ ne.focus(); try{ ne.setSelectionRange(pos, pos); }catch(e){} }
+}
+function onAddressCompositionStart(el){
+  if(el.dataset) el.dataset.composing = "1";
+}
+function onAddressCompositionEnd(el){
+  if(el.dataset) el.dataset.composing = "";
+  onAddressInput(el);
 }
 function toggleManualAreaGrid(){
   showManualAreaGrid = !showManualAreaGrid;
@@ -580,7 +587,7 @@ function renderAreaCard(){
 
   title.textContent = "現場住所からエリアを判定";
   let html = `<div class="search-row">
-    <input type="text" id="addressInput" placeholder="現場住所を入力（例：埼玉県川口市〇〇）" value="${escapeAttr(lastAddress)}" oninput="onAddressInput(this)">
+    <input type="text" id="addressInput" placeholder="現場住所を入力（例：埼玉県川口市〇〇）" value="${escapeAttr(lastAddress)}" oninput="onAddressInput(this)" oncompositionstart="onAddressCompositionStart(this)" oncompositionend="onAddressCompositionEnd(this)">
   </div>`;
 
   const cz = currentZone();
